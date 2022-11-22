@@ -1181,7 +1181,6 @@ bool kbase_gpu_irq_evict(struct kbase_device *kbdev, int js,
  * otherwise we would be in the incorrect state of having an atom both running
  * on the HW and returned to the JS.
  */
-
 void kbase_gpu_complete_hw(struct kbase_device *kbdev, int js,
 				u32 completion_code,
 				u64 job_tail,

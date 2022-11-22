@@ -873,10 +873,10 @@ exit:
 	dev_dbg(kbdev->dev, "Zap: Finished Context %pK", kctx);
 
 	/* Ensure that the signallers of the waitqs have finished */
-	mutex_lock(&kctx->jctx.lock);
-	mutex_lock(&kctx->jctx.sched_info.ctx.jsctx_mutex);
-	mutex_unlock(&kctx->jctx.sched_info.ctx.jsctx_mutex);
-	mutex_unlock(&kctx->jctx.lock);
+	rt_mutex_lock(&kctx->jctx.lock);
+	rt_mutex_lock(&kctx->jctx.sched_info.ctx.jsctx_mutex);
+	rt_mutex_unlock(&kctx->jctx.sched_info.ctx.jsctx_mutex);
+	rt_mutex_unlock(&kctx->jctx.lock);
 }
 
 u32 kbase_backend_get_current_flush_id(struct kbase_device *kbdev)
@@ -949,12 +949,10 @@ void kbase_job_slot_hardstop(struct kbase_context *kctx, int js,
 				struct kbase_jd_atom *target_katom)
 {
 	struct kbase_device *kbdev = kctx->kbdev;
-	bool stopped;
 
-	stopped = kbase_backend_soft_hard_stop_slot(kbdev, kctx, js,
+	kbase_backend_soft_hard_stop_slot(kbdev, kctx, js,
 							target_katom,
 							JS_COMMAND_HARD_STOP);
-	CSTD_UNUSED(stopped);
 }
 
 void kbase_job_check_enter_disjoint(struct kbase_device *kbdev, u32 action,

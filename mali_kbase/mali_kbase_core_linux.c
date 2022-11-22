@@ -199,6 +199,37 @@ bool mali_kbase_supports_cap(unsigned long api_version, enum mali_kbase_cap cap)
 	return supported;
 }
 
+struct task_struct *kbase_create_realtime_thread(struct kbase_device *kbdev,
+	int (*threadfn)(void *data), void *data, const char namefmt[])
+{
+	unsigned int i;
+
+	cpumask_t mask = { CPU_BITS_NONE };
+
+	static const struct sched_param param = {
+		.sched_priority = KBASE_RT_THREAD_PRIO,
+	};
+
+	struct task_struct *ret = kthread_create(kthread_worker_fn, data, namefmt);
+
+	if (!IS_ERR(ret)) {
+		for (i = KBASE_RT_THREAD_CPUMASK_MIN; i <= KBASE_RT_THREAD_CPUMASK_MAX ; i++)
+			cpumask_set_cpu(i, &mask);
+
+		kthread_bind_mask(ret, &mask);
+
+		wake_up_process(ret);
+
+		if (sched_setscheduler_nocheck(ret, SCHED_FIFO, &param))
+			dev_warn(kbdev->dev, "%s not set to RT prio", namefmt);
+		else
+			dev_dbg(kbdev->dev, "%s set to RT prio: %i",
+				namefmt, param.sched_priority);
+	}
+
+	return ret;
+}
+
 /**
  * kbase_file_new - Create an object representing a device file
  *
@@ -764,7 +795,7 @@ static int kbase_api_set_flags(struct kbase_file *kfile,
 		 */
 #else
 		js_kctx_info = &kctx->jctx.sched_info;
-		mutex_lock(&js_kctx_info->ctx.jsctx_mutex);
+		rt_mutex_lock(&js_kctx_info->ctx.jsctx_mutex);
 		spin_lock_irqsave(&kctx->kbdev->hwaccess_lock, irq_flags);
 		/* Translate the flags */
 		if ((flags->create_flags &
@@ -773,11 +804,18 @@ static int kbase_api_set_flags(struct kbase_file *kfile,
 
 
 		spin_unlock_irqrestore(&kctx->kbdev->hwaccess_lock, irq_flags);
-		mutex_unlock(&js_kctx_info->ctx.jsctx_mutex);
+		rt_mutex_unlock(&js_kctx_info->ctx.jsctx_mutex);
 #endif
 	}
 
 	return err;
+}
+
+static int kbase_api_apc_request(struct kbase_file *kfile,
+		struct kbase_ioctl_apc_request *apc)
+{
+	kbase_pm_apc_request(kfile->kbdev, apc->dur_usec);
+	return 0;
 }
 
 #if !MALI_USE_CSF
@@ -1740,6 +1778,13 @@ static long kbase_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 				kfile);
 		break;
 
+	case KBASE_IOCTL_APC_REQUEST:
+		KBASE_HANDLE_IOCTL_IN(KBASE_IOCTL_APC_REQUEST,
+				kbase_api_apc_request,
+				struct kbase_ioctl_apc_request,
+				kfile);
+		break;
+
 	case KBASE_IOCTL_KINSTR_PRFCNT_ENUM_INFO:
 		KBASE_HANDLE_IOCTL_INOUT(
 			KBASE_IOCTL_KINSTR_PRFCNT_ENUM_INFO,
@@ -2219,15 +2264,22 @@ static unsigned int kbase_poll(struct file *filp, poll_table *wait)
 	return 0;
 }
 
-void kbase_event_wakeup(struct kbase_context *kctx)
+void _kbase_event_wakeup(struct kbase_context *kctx, bool sync)
 {
 	KBASE_DEBUG_ASSERT(kctx);
-	dev_dbg(kctx->kbdev->dev, "Waking event queue for context %pK\n",
-		(void *)kctx);
-	wake_up_interruptible(&kctx->event_queue);
+        if(sync) {
+	    dev_dbg(kctx->kbdev->dev,
+                    "Waking event queue for context %pK (sync)\n", (void *)kctx);
+	    wake_up_interruptible_sync(&kctx->event_queue);
+        }
+        else {
+	    dev_dbg(kctx->kbdev->dev,
+                    "Waking event queue for context %pK (nosync)\n",(void *)kctx);
+	    wake_up_interruptible(&kctx->event_queue);
+        }
 }
 
-KBASE_EXPORT_TEST_API(kbase_event_wakeup);
+KBASE_EXPORT_TEST_API(_kbase_event_wakeup);
 
 #if MALI_USE_CSF
 int kbase_event_pending(struct kbase_context *ctx)
@@ -5157,6 +5209,36 @@ static struct attribute *kbase_scheduling_attrs[] = {
 	NULL
 };
 
+static ssize_t total_gpu_mem_show(
+	struct device *dev,
+	struct device_attribute *attr,
+	char *const buf)
+{
+	struct kbase_device *kbdev;
+	kbdev = to_kbase_device(dev);
+	if (!kbdev)
+		return -ENODEV;
+
+	return sysfs_emit(buf, "%lu\n",
+		(unsigned long) kbdev->total_gpu_pages << PAGE_SHIFT);
+}
+static DEVICE_ATTR_RO(total_gpu_mem);
+
+static ssize_t dma_buf_gpu_mem_show(
+	struct device *dev,
+	struct device_attribute *attr,
+	char *const buf)
+{
+	struct kbase_device *kbdev;
+	kbdev = to_kbase_device(dev);
+	if (!kbdev)
+		return -ENODEV;
+
+	return sysfs_emit(buf, "%lu\n",
+		(unsigned long) kbdev->dma_buf_pages << PAGE_SHIFT);
+}
+static DEVICE_ATTR_RO(dma_buf_gpu_mem);
+
 static struct attribute *kbase_attrs[] = {
 #ifdef CONFIG_MALI_DEBUG
 	&dev_attr_debug_command.attr,
@@ -5188,6 +5270,8 @@ static struct attribute *kbase_attrs[] = {
 #if !MALI_USE_CSF
 	&dev_attr_js_ctx_scheduling_mode.attr,
 #endif /* !MALI_USE_CSF */
+	&dev_attr_total_gpu_mem.attr,
+	&dev_attr_dma_buf_gpu_mem.attr,
 	NULL
 };
 
@@ -5249,6 +5333,9 @@ int kbase_sysfs_init(struct kbase_device *kbdev)
 			&kbase_attr_group);
 	}
 
+	kbdev->proc_sysfs_node = kobject_create_and_add("kprcs",
+			&kbdev->dev->kobj);
+
 	return err;
 }
 
@@ -5257,6 +5344,8 @@ void kbase_sysfs_term(struct kbase_device *kbdev)
 	sysfs_remove_group(&kbdev->dev->kobj, &kbase_mempool_attr_group);
 	sysfs_remove_group(&kbdev->dev->kobj, &kbase_scheduling_attr_group);
 	sysfs_remove_group(&kbdev->dev->kobj, &kbase_attr_group);
+	kobject_del(kbdev->proc_sysfs_node);
+	kobject_put(kbdev->proc_sysfs_node);
 	put_device(kbdev->dev);
 }
 
@@ -5596,7 +5685,7 @@ MODULE_LICENSE("GPL");
 MODULE_VERSION(MALI_RELEASE_NAME " (UK version " \
 		__stringify(BASE_UK_VERSION_MAJOR) "." \
 		__stringify(BASE_UK_VERSION_MINOR) ")");
-MODULE_SOFTDEP("pre: memory_group_manager");
+MODULE_SOFTDEP("pre: mali_pixel");
 MODULE_INFO(import_ns, "DMA_BUF");
 
 #define CREATE_TRACE_POINTS

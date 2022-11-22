@@ -79,7 +79,7 @@ int kbase_sync_fence_stream_create(const char *name, int *const out_fd);
  *
  * Return: Valid file descriptor to fence or < 0 on error
  */
-int kbase_sync_fence_out_create(struct kbase_jd_atom *katom, int stream_fd);
+struct sync_file *kbase_sync_fence_out_create(struct kbase_jd_atom *katom, int stream_fd);
 
 /**
  * kbase_sync_fence_in_from_fd() - Assigns an existing fence to specified atom
@@ -204,7 +204,7 @@ const char *kbase_sync_status_string(int status);
 /*
  * Internal worker used to continue processing of atom.
  */
-void kbase_sync_fence_wait_worker(struct work_struct *data);
+void kbase_sync_fence_wait_worker(struct kthread_work *data);
 
 #ifdef CONFIG_MALI_FENCE_DEBUG
 /**

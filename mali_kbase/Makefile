@@ -21,9 +21,29 @@
 KERNEL_SRC ?= /lib/modules/$(shell uname -r)/build
 KDIR ?= $(KERNEL_SRC)
 
+# Ensure build intermediates are in OUT_DIR instead of alongside the source
+M ?= $(shell pwd)
+
 ifeq ($(KDIR),)
     $(error Must specify KDIR to point to the kernel to target))
 endif
+
+
+#
+# Pixel integration configuration values
+#
+
+# Core kbase configuration options
+CONFIG_MALI_EXPERT=y
+CONFIG_MALI_MIDGARD_DVFS=y
+
+# Pixel integration specific configuration options
+CONFIG_MALI_PLATFORM_NAME="pixel"
+CONFIG_MALI_PIXEL_GPU_QOS=y
+CONFIG_MALI_PIXEL_GPU_BTS=y
+CONFIG_MALI_PIXEL_GPU_THERMAL=y
+CONFIG_MALI_PIXEL_GPU_SECURE_RENDERING=y
+
 
 #
 # Default configuration values
@@ -191,6 +211,13 @@ CONFIGS := \
     CONFIG_MALI_KUTF_CLK_RATE_TRACE \
     CONFIG_MALI_XEN
 
+# Pixel integration CONFIG options
+CONFIGS += \
+    CONFIG_MALI_PIXEL_GPU_QOS \
+    CONFIG_MALI_PIXEL_GPU_BTS \
+    CONFIG_MALI_PIXEL_GPU_THERMAL \
+    CONFIG_MALI_PIXEL_GPU_SECURE_RENDERING
+
 
 #
 # MAKE_ARGS to pass the custom CONFIGs on out-of-tree build
@@ -223,10 +250,10 @@ EXTRA_CFLAGS += -DCONFIG_MALI_PLATFORM_NAME=$(CONFIG_MALI_PLATFORM_NAME)
 #
 
 all:
-	$(MAKE) -C $(KDIR) M=$(CURDIR) $(MAKE_ARGS) EXTRA_CFLAGS="$(EXTRA_CFLAGS)" KBUILD_EXTRA_SYMBOLS="$(EXTRA_SYMBOLS)" modules
+	$(MAKE) -C $(KDIR) M=$(M) W=1 $(MAKE_ARGS) EXTRA_CFLAGS="$(EXTRA_CFLAGS)" KBUILD_EXTRA_SYMBOLS="$(EXTRA_SYMBOLS)" modules
 
 modules_install:
-	$(MAKE) -C $(KDIR) M=$(CURDIR) $(MAKE_ARGS) modules_install
+	$(MAKE) -C $(KDIR) M=$(M) W=1 $(MAKE_ARGS) modules_install
 
 clean:
-	$(MAKE) -C $(KDIR) M=$(CURDIR) $(MAKE_ARGS) clean
+	$(MAKE) -C $(KDIR) M=$(M) W=1 $(MAKE_ARGS) clean

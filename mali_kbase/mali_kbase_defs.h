@@ -51,7 +51,7 @@
 #include <linux/slab.h>
 #include <linux/file.h>
 #include <linux/sizes.h>
-
+#include <linux/rtmutex.h>
 
 #if defined(CONFIG_SYNC)
 #include <sync.h>
@@ -122,6 +122,32 @@
 #else
 #define KBASE_REG_ZONE_MAX 4ul
 #endif
+
+/**
+ * Priority level for realtime worker threads
+ */
+#define KBASE_RT_THREAD_PRIO (2)
+
+/* TODO(b/181145264) get the following two numbers from device tree */
+/**
+ * First CPU in the contiguous CPU mask used for realtime worker threads.
+ */
+#define KBASE_RT_THREAD_CPUMASK_MIN (0)
+
+/**
+ * Last CPU in the contiguous CPU mask used for realtime worker threads.
+ */
+#define KBASE_RT_THREAD_CPUMASK_MAX (3)
+
+/**
+ * Minimum allowed wake duration in usec for apc request.
+ */
+#define KBASE_APC_MIN_DUR_USEC (100)
+
+/**
+ * Maximum allowed wake duration in usec for apc request.
+ */
+#define KBASE_APC_MAX_DUR_USEC (4000)
 
 #include "mali_kbase_hwaccess_defs.h"
 
@@ -264,7 +290,7 @@ struct kbase_fault {
  */
 struct kbase_mmu_table {
 	u64 *mmu_teardown_pages[MIDGARD_MMU_BOTTOMLEVEL];
-	struct mutex mmu_lock;
+	struct rt_mutex mmu_lock;
 	phys_addr_t pgd;
 	u8 group_id;
 	struct kbase_context *kctx;
@@ -621,6 +647,9 @@ struct kbase_devfreq_queue_info {
  * @total_gpu_pages:    Total gpu pages allocated across all the contexts
  *                      of this process, it accounts for both native allocations
  *                      and dma_buf imported allocations.
+ * @dma_buf_pages:      Total dma_buf pages allocated across all the contexts
+ *                      of this process, native allocations can be accounted for
+ *                      by subtracting this from &total_gpu_pages.
  * @kctx_list:          List of kbase contexts created for the process.
  * @kprcs_node:         Node to a rb_tree, kbase_device will maintain a rb_tree
  *                      based on key tgid, kprcs_node is the node link to
@@ -630,14 +659,19 @@ struct kbase_devfreq_queue_info {
  *                      Used to ensure that pages of allocation are accounted
  *                      only once for the process, even if the allocation gets
  *                      imported multiple times for the process.
+ * @kobj:               Links to the per-process sysfs node
+ *                      &kbase_device.proc_sysfs_node.
  */
 struct kbase_process {
 	pid_t tgid;
 	size_t total_gpu_pages;
+	size_t dma_buf_pages;
 	struct list_head kctx_list;
 
 	struct rb_node kprcs_node;
 	struct rb_root dma_buf_root;
+
+	struct kobject kobj;
 };
 
 /**
@@ -937,11 +971,24 @@ struct kbase_process {
  *                          mapping and gpu memory usage at device level and
  *                          other one at process level.
  * @total_gpu_pages:        Total GPU pages used for the complete GPU device.
+ * @dma_buf_pages:          Total dma_buf pages used for GPU platform device.
  * @dma_buf_lock:           This mutex should be held while accounting for
  *                          @total_gpu_pages from imported dma buffers.
  * @gpu_mem_usage_lock:     This spinlock should be held while accounting
  *                          @total_gpu_pages for both native and dma-buf imported
  *                          allocations.
+ * @job_done_worker:        Worker for job_done work.
+ * @job_done_worker_thread: Thread for job_done work.
+ * @event_worker:           Worker for event work.
+ * @event_worker_thread:    Thread for event work.
+ * @apc.worker:             Worker for async power control work.
+ * @apc.thread:             Thread for async power control work.
+ * @apc.power_on_work:      Work struct for powering on the GPU.
+ * @apc.power_off_work:     Work struct for powering off the GPU.
+ * @apc.end_ts:             The latest end timestamp to power off the GPU.
+ * @apc.timer:              A hrtimer for powering off based on wake duration.
+ * @apc.pending:            Whether an APC power on request is active and not handled yet.
+ * @apc.lock:               Lock for @apc.end_ts, @apc.timer and @apc.pending.
  * @dummy_job_wa:           struct for dummy job execution workaround for the
  *                          GPU hang issue
  * @dummy_job_wa.ctx:       dummy job workaround context
@@ -954,6 +1001,7 @@ struct kbase_process {
  * @pcm_dev:                The priority control manager device.
  * @oom_notifier_block:     notifier_block containing kernel-registered out-of-
  *                          memory handler.
+ * @proc_sysfs_node:        Sysfs directory node to store per-process stats.
  */
 struct kbase_device {
 	u32 hw_quirks_sc;
@@ -1193,6 +1241,11 @@ struct kbase_device {
 #else
 	struct kbasep_js_device_data js_data;
 
+	struct kthread_worker job_done_worker;
+	struct task_struct *job_done_worker_thread;
+	struct kthread_worker event_worker;
+	struct task_struct *event_worker_thread;
+
 	/* See KBASE_JS_*_PRIORITY_MODE for details. */
 	u32 js_ctx_scheduling_mode;
 
@@ -1205,10 +1258,22 @@ struct kbase_device {
 
 #endif /* MALI_USE_CSF */
 
+	struct {
+		struct kthread_worker worker;
+		struct task_struct *thread;
+		struct kthread_work power_on_work;
+		struct kthread_work power_off_work;
+		ktime_t end_ts;
+		struct hrtimer timer;
+		bool pending;
+		struct mutex lock;
+	} apc;
+
 	struct rb_root process_root;
 	struct rb_root dma_buf_root;
 
 	size_t total_gpu_pages;
+	size_t dma_buf_pages;
 	struct mutex dma_buf_lock;
 	spinlock_t gpu_mem_usage_lock;
 
@@ -1228,6 +1293,7 @@ struct kbase_device {
 
 	struct notifier_block oom_notifier_block;
 
+	struct kobject *proc_sysfs_node;
 };
 
 /**
@@ -1476,8 +1542,6 @@ struct kbase_sub_alloc {
  * @event_closed:         Flag set through POST_TERM ioctl, indicates that Driver
  *                        should stop posting events and also inform event handling
  *                        thread that context termination is in progress.
- * @event_workq:          Workqueue for processing work items corresponding to atoms
- *                        that do not return an event to userspace.
  * @event_count:          Count of the posted events to be consumed by Userspace.
  * @event_coalesce_count: Count of the events present in @event_coalesce_list.
  * @flags:                bitmap of enums from kbase_context_flags, indicating the
@@ -1633,7 +1697,7 @@ struct kbase_sub_alloc {
  * @completed_jobs:       List containing completed atoms for which base_jd_event is
  *                        to be posted.
  * @work_count:           Number of work items, corresponding to atoms, currently
- *                        pending on job_done workqueue of @jctx.
+ *                        pending on job_done kthread of @jctx.
  * @soft_job_timeout:     Timer object used for failing/cancelling the waiting
  *                        soft-jobs which have been blocked for more than the
  *                        timeout value used for the soft-jobs

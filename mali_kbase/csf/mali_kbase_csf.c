@@ -1809,7 +1809,7 @@ void kbase_csf_ctx_handle_fault(struct kbase_context *kctx,
 	mutex_unlock(&kctx->csf.lock);
 
 	if (reported)
-		kbase_event_wakeup(kctx);
+		kbase_event_wakeup_sync(kctx);
 
 	kbase_reset_gpu_allow(kbdev);
 }
@@ -2009,7 +2009,7 @@ static void report_tiler_oom_error(struct kbase_queue_group *group)
 	kbase_csf_event_add_error(group->kctx,
 				  &group->error_tiler_oom,
 				  &error);
-	kbase_event_wakeup(group->kctx);
+	kbase_event_wakeup_sync(group->kctx);
 }
 
 /**
@@ -2154,7 +2154,7 @@ static void report_group_timeout_error(struct kbase_queue_group *const group)
 		 kbase_csf_timeout_get(group->kctx->kbdev));
 
 	kbase_csf_event_add_error(group->kctx, &group->error_timeout, &error);
-	kbase_event_wakeup(group->kctx);
+	kbase_event_wakeup_sync(group->kctx);
 }
 
 /**

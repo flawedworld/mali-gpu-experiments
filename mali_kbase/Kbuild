@@ -72,6 +72,10 @@ endif
 
 # Driver version string which is returned to userspace via an ioctl
 MALI_RELEASE_NAME ?= '"r36p0-01eac0"'
+
+# We are building for Pixel
+CONFIG_MALI_PLATFORM_NAME="pixel"
+
 # Set up defaults if not defined by build system
 ifeq ($(CONFIG_MALI_DEBUG), y)
     MALI_UNIT_TEST = 1
@@ -138,6 +142,9 @@ ccflags-y += \
     -I$(src)/platform/$(MALI_PLATFORM_DIR) \
     -I$(src)/../../../base \
     -I$(src)/../../../../include
+
+# Add include path for related GPU modules
+ccflags-y += -I$(src)/../common/include
 
 subdir-ccflags-y += $(ccflags-y)
 

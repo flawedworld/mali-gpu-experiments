@@ -59,7 +59,7 @@ int kbase_sync_fence_stream_create(const char *name, int *const out_fd)
 }
 
 #if !MALI_USE_CSF
-int kbase_sync_fence_out_create(struct kbase_jd_atom *katom, int stream_fd)
+struct sync_file *kbase_sync_fence_out_create(struct kbase_jd_atom *katom, int stream_fd)
 {
 #if (KERNEL_VERSION(4, 10, 0) > LINUX_VERSION_CODE)
 	struct fence *fence;
@@ -67,11 +67,10 @@ int kbase_sync_fence_out_create(struct kbase_jd_atom *katom, int stream_fd)
 	struct dma_fence *fence;
 #endif
 	struct sync_file *sync_file;
-	int fd;
 
 	fence = kbase_fence_out_new(katom);
 	if (!fence)
-		return -ENOMEM;
+		return NULL;
 
 #if (KERNEL_VERSION(4, 9, 67) >= LINUX_VERSION_CODE)
 	/* Take an extra reference to the fence on behalf of the sync_file.
@@ -89,19 +88,9 @@ int kbase_sync_fence_out_create(struct kbase_jd_atom *katom, int stream_fd)
 		dma_fence_put(fence);
 #endif
 		kbase_fence_out_remove(katom);
-		return -ENOMEM;
+		return NULL;
 	}
-
-	fd = get_unused_fd_flags(O_CLOEXEC);
-	if (fd < 0) {
-		fput(sync_file->file);
-		kbase_fence_out_remove(katom);
-		return fd;
-	}
-
-	fd_install(fd, sync_file->file);
-
-	return fd;
+	return sync_file;
 }
 
 int kbase_sync_fence_in_from_fd(struct kbase_jd_atom *katom, int fd)
@@ -188,14 +177,14 @@ static void kbase_fence_wait_callback(struct dma_fence *fence,
 		kbase_fence_dep_count_set(katom, -1);
 
 		/* To prevent a potential deadlock we schedule the work onto the
-		 * job_done_wq workqueue
+		 * job_done_worker kthread
 		 *
 		 * The issue is that we may signal the timeline while holding
 		 * kctx->jctx.lock and the callbacks are run synchronously from
 		 * sync_timeline_signal. So we simply defer the work.
 		 */
-		INIT_WORK(&katom->work, kbase_sync_fence_wait_worker);
-		queue_work(kctx->jctx.job_done_wq, &katom->work);
+		kthread_init_work(&katom->work, kbase_sync_fence_wait_worker);
+		kthread_queue_work(&kctx->kbdev->job_done_worker, &katom->work);
 	}
 }
 
@@ -237,8 +226,8 @@ int kbase_sync_fence_in_wait(struct kbase_jd_atom *katom)
 		/* We should cause the dependent jobs in the bag to be failed,
 		 * to do this we schedule the work queue to complete this job
 		 */
-		INIT_WORK(&katom->work, kbase_sync_fence_wait_worker);
-		queue_work(katom->kctx->jctx.job_done_wq, &katom->work);
+		kthread_init_work(&katom->work, kbase_sync_fence_wait_worker);
+		kthread_queue_work(&katom->kctx->kbdev->job_done_worker, &katom->work);
 	}
 
 	return 1; /* completion to be done later by callback/worker */

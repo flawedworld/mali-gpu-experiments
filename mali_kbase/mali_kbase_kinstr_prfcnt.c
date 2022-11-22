@@ -423,6 +423,9 @@ static bool kbase_kinstr_is_block_type_reserved(const struct kbase_hwcnt_metadat
  *
  * Return: 0 on success, else error code.
  */
+#if !MALI_KERNEL_TEST_API
+static
+#endif
 int kbasep_kinstr_prfcnt_set_block_meta_items(struct kbase_hwcnt_enable_map *enable_map,
 					      struct kbase_hwcnt_dump_buffer *dst,
 					      struct prfcnt_metadata **block_meta_base,
@@ -936,6 +939,9 @@ kbasep_kinstr_prfcnt_client_discard(struct kbase_kinstr_prfcnt_client *cli)
 	return 0;
 }
 
+#if !MALI_KERNEL_TEST_API
+static
+#endif
 int kbasep_kinstr_prfcnt_cmd(struct kbase_kinstr_prfcnt_client *cli,
 			     struct prfcnt_control_cmd *control_cmd)
 {
@@ -1201,6 +1207,9 @@ static void kbasep_kinstr_prfcnt_sample_array_free(
 	memset(sample_arr, 0, sizeof(*sample_arr));
 }
 
+#if !MALI_KERNEL_TEST_API
+static
+#endif
 void kbasep_kinstr_prfcnt_client_destroy(struct kbase_kinstr_prfcnt_client *cli)
 {
 	if (!cli)
@@ -1250,6 +1259,9 @@ static const struct file_operations kinstr_prfcnt_client_fops = {
 	.release = kbasep_kinstr_prfcnt_hwcnt_reader_release,
 };
 
+#if !MALI_KERNEL_TEST_API
+static
+#endif
 size_t kbasep_kinstr_prfcnt_get_sample_md_count(const struct kbase_hwcnt_metadata *metadata,
 						struct kbase_hwcnt_enable_map *enable_map)
 {
@@ -1827,6 +1839,9 @@ static int kbasep_kinstr_prfcnt_parse_setup(struct kbase_kinstr_prfcnt_context *
 	return err;
 }
 
+#if !MALI_KERNEL_TEST_API
+static
+#endif
 int kbasep_kinstr_prfcnt_client_create(struct kbase_kinstr_prfcnt_context *kinstr_ctx,
 				       union kbase_ioctl_kinstr_prfcnt_setup *setup,
 				       struct kbase_kinstr_prfcnt_client **out_vcli,
@@ -1958,6 +1973,9 @@ static void kbasep_kinstr_prfcnt_get_sample_info_item(const struct kbase_hwcnt_m
 	*arr_idx += 1;
 }
 
+#if !MALI_KERNEL_TEST_API
+static
+#endif
 int kbasep_kinstr_prfcnt_get_block_info_list(const struct kbase_hwcnt_metadata *metadata,
 					     size_t block_set, struct prfcnt_enum_item *item_arr,
 					     size_t *arr_idx)

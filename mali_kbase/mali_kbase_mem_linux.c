@@ -48,10 +48,8 @@
 #include <mali_kbase_trace_gpu_mem.h>
 #include <mali_kbase_reset_gpu.h>
 
-#if ((KERNEL_VERSION(5, 3, 0) <= LINUX_VERSION_CODE) || \
-	(KERNEL_VERSION(5, 0, 0) > LINUX_VERSION_CODE))
-/* Enable workaround for ion for kernels prior to v5.0.0 and from v5.3.0
- * onwards.
+#if (KERNEL_VERSION(5, 0, 0) > LINUX_VERSION_CODE)
+/* Enable workaround for ion for kernels prior to v5.0.0
  *
  * For kernels prior to v4.12, workaround is needed as ion lacks the cache
  * maintenance in begin_cpu_access and end_cpu_access methods.
@@ -74,7 +72,7 @@
  * import. The same problem can if there is another importer of dma-buf
  * memory.
  *
- * Workaround can be safely disabled for kernels between v5.0.0 and v5.2.2,
+ * Workaround can be safely disabled for kernels after v5.0.0
  * as all the above stated issues are not there.
  *
  * dma_sync_sg_for_* calls will be made directly as a workaround using the
@@ -1681,13 +1679,19 @@ KERNEL_VERSION(4, 5, 0) > LINUX_VERSION_CODE
 	faulted_pages = get_user_pages(address, *va_pages,
 			write ? FOLL_WRITE : 0, pages, NULL);
 #else
-	/* pin_user_pages function cannot be called with pages param NULL.
+
+	/*
+	 * User buffers should be pinned with FOLL_LONGTERM flag as their usage
+	 * cannot be time bounded. This will make sure that we do not pin pages
+	 * in the CMA region.
+	 * pin_user_pages function cannot be called with pages param NULL.
 	 * get_user_pages function will be used instead because it is safe to be
 	 * used with NULL pages param as long as it doesn't have FOLL_GET flag.
 	 */
 	if (pages != NULL) {
 		faulted_pages =
-			pin_user_pages(address, *va_pages, write ? FOLL_WRITE : 0, pages, NULL);
+			pin_user_pages(address, *va_pages,
+				write ? FOLL_WRITE | FOLL_LONGTERM : FOLL_LONGTERM, pages, NULL);
 	} else {
 		faulted_pages =
 			get_user_pages(address, *va_pages, write ? FOLL_WRITE : 0, pages, NULL);
@@ -1798,7 +1802,7 @@ u64 kbase_mem_alias(struct kbase_context *kctx, u64 *flags, u64 stride,
 	if (!nents)
 		goto bad_nents;
 
-	if ((nents * stride) > (U64_MAX / PAGE_SIZE))
+	if (nents > (U64_MAX / PAGE_SIZE) / stride)
 		/* 64-bit address range is the max */
 		goto bad_size;
 
@@ -2421,6 +2425,34 @@ static void kbase_cpu_vm_close(struct vm_area_struct *vma)
 	kfree(map);
 }
 
+static int kbase_cpu_vm_split(struct vm_area_struct *vma, unsigned long addr)
+{
+	struct kbase_cpu_mapping *map = vma->vm_private_data;
+
+	KBASE_DEBUG_ASSERT(map->kctx);
+	KBASE_DEBUG_ASSERT(map->count > 0);
+
+	/*
+	 * We should never have a map/munmap pairing on a kbase_context managed
+	 * vma such that the munmap only unmaps a portion of the vma range.
+	 * Should this arise, the kernel attempts to split the vma range to
+	 * ensure that it only unmaps the requested region. To achieve this it
+	 * attempts to split the containing vma split occurs, and this callback
+	 * is reached. By returning -EINVAL here we inform the kernel that such
+	 * splits are not supported so that it instead unmaps the entire region.
+	 * Since this is indicative of a bug in the map/munmap code in the
+	 * driver, we raise a WARN here to indicate that this invalid
+	 * state has been reached.
+	 */
+	dev_warn(map->kctx->kbdev->dev,
+		"%s: vma region split requested: addr=%lx map->count=%d reg=%p reg->start_pfn=%llx reg->nr_pages=%zu",
+		__func__, addr, map->count, map->region, map->region->start_pfn,
+		map->region->nr_pages);
+	WARN_ON_ONCE(1);
+
+	return -EINVAL;
+}
+
 static struct kbase_aliased *get_aliased_alloc(struct vm_area_struct *vma,
 					struct kbase_va_region *reg,
 					pgoff_t *start_off,
@@ -2529,6 +2561,7 @@ exit:
 const struct vm_operations_struct kbase_vm_ops = {
 	.open  = kbase_cpu_vm_open,
 	.close = kbase_cpu_vm_close,
+	.split = kbase_cpu_vm_split,
 	.fault = kbase_cpu_vm_fault
 };
 
@@ -2773,7 +2806,7 @@ static int kbasep_reg_mmap(struct kbase_context *kctx,
 			   reg->nr_pages, 1, mmu_sync_info) != 0) {
 		dev_err(kctx->kbdev->dev, "%s:%d\n", __FILE__, __LINE__);
 		/* Unable to map in GPU space. */
-		WARN_ON(1);
+		WARN_ON_ONCE(1);
 		err = -ENOMEM;
 		goto out;
 	}
